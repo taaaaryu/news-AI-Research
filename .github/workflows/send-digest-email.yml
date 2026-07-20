@@ -1,0 +1,65 @@
+name: Send Digest Email
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'digests/*.md'
+  workflow_dispatch:
+    inputs:
+      file:
+        description: '送信するdigestファイルパス（空なら最新のものを自動選択）'
+        required: false
+
+jobs:
+  send-email:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find digest file(s) to send
+        id: find
+        run: |
+          manual="${{ github.event.inputs.file }}"
+          if [ -n "$manual" ]; then
+            file="$manual"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            file=$(ls -1 digests/*.md | sort | tail -n1)
+          else
+            before="${{ github.event.before }}"
+            if git cat-file -e "$before" 2>/dev/null; then
+              files=$(git diff --name-only "$before" "${{ github.sha }}" -- 'digests/*.md')
+            else
+              files=$(git show --name-only --pretty="" "${{ github.sha }}" -- 'digests/*.md')
+            fi
+            file=$(echo "$files" | tail -n1)
+          fi
+          if [ -z "$file" ]; then
+            echo "no digest file to send, skipping"
+            echo "file=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          echo "date=$(basename "$file" .md)" >> "$GITHUB_OUTPUT"
+
+      - name: Render styled HTML email
+        if: steps.find.outputs.file != ''
+        run: |
+          npx --yes marked < "${{ steps.find.outputs.file }}" > /tmp/fragment.html
+          node .github/scripts/wrap-email.mjs /tmp/fragment.html /tmp/email.html "${{ steps.find.outputs.date }}"
+
+      - name: Send email
+        if: steps.find.outputs.file != ''
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.GMAIL_USERNAME }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: "[AI/ITダイジェスト] ${{ steps.find.outputs.date }}"
+          to: taruu6109@gmail.com
+          from: "AI/IT Digest <${{ secrets.GMAIL_USERNAME }}>"
+          html_body: file:///tmp/email.html
